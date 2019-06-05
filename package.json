@@ -1,0 +1,20 @@
+{
+    "scripts": {
+        "build": "webpack --target=webworker",
+        "build:prod": "webpack --target=webworker -prod",
+        "serve": "cloudworker -f StorKV=stor.json -w Sha1Wasm=wasm/sha1/sha1.wasm dist/main.js",
+        "serve:watch": "nodemon --delay .2 --watch src -e js,ts --exec \"npm run build && npm run serve\""
+    },
+    "dependencies": {
+        "@types/webassembly-web-api": "0.0.2",
+        "awesome-typescript-loader": "^5.2.1",
+        "baseconv": "github:ssttevee/baseconv-js",
+        "http-hash": "^2.0.1",
+        "typescript": "^3.4.3",
+        "webpack": "^4.30.0",
+        "webpack-cli": "^3.3.0"
+    },
+    "devDependencies": {
+        "nodemon": "^1.18.11"
+    }
+}

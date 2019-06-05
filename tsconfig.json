@@ -1,0 +1,23 @@
+{
+    "compilerOptions": {
+        "module": "commonjs",
+        "target": "esnext",
+        // "resolveJsonModule": true,
+        "lib": [
+            "webworker",
+            "esnext",
+        ],
+        "baseUrl": ".",
+        "paths": {
+            "ruta3": ["node_modules/ruta3/index.js"],
+            "fd": ["local_modules/fd/index.ts"],
+        },
+        "typeRoots": [
+            "./types",
+        ],
+        "esModuleInterop": true,
+    },
+    "include": [
+        "src/**/*",
+    ],
+}
