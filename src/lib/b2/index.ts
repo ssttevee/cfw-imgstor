@@ -1,6 +1,6 @@
-import { Summer as SHA1Summer, SumInput, sum as sha1sum } from '../../lib/sha1';
+import { Summer as SHA1Summer } from '../../lib/sha1';
 
-interface B2File {
+interface FileInfo {
     accountId: string;
     action: 'start' | 'upload' | 'hide' | 'folder';
     bucketId: string;
@@ -13,34 +13,16 @@ interface B2File {
     uploadTimestamp: number;
 }
 
-export interface B2Bucket {
-    bucketId: string;
-    put(file: any, name: string, length: number, options?: { contentType?: string, checksum?: string }): Promise<string>;
-    get(fileId: string, options?: { range?: string, contentDisposition?: string }): Promise<File>;
-}
-
 interface AuthorizedAccount {
     apiUrl: string;
     downloadUrl: string;
     authorizationToken: string;
 }
 
-type Uploader = (file: SumInput, name: string, length: number, options: { contentType?: string, checksum?: string }) => Promise<B2File>;
-type UploaderFactory = AsyncIterator<Uploader>;
-
 interface UploadURL {
     uploadUrl: string;
     authorizationToken: string;
 }
-
-type AccountFunction = (renew?: boolean) => Promise<AuthorizedAccount>;
-type AccountFactory = AsyncIterator<AuthorizedAccount>;
-
-export interface File extends ReadableStream<Uint8Array> {
-    get(key: string): string;
-}
-
-const Expired = Symbol('expired');
 
 export class B2APIError extends Error {
     constructor(data: any, ...extra: any[]) {
@@ -52,109 +34,79 @@ function strToBuf(str: string): Uint8Array {
     return new Uint8Array(str.split('').map((c) => c.charCodeAt(0)));
 }
 
-function createSummingReadableStream(input: SumInput): ReadableStream<Uint8Array> {
-    if (input instanceof ReadableStream) {
-        // if (input instanceof ReadableStream) {
-        // const summer = new SHA1Summer();
-        // const ts = new TransformStream<Uint8Array, Uint8Array>({
-        //     transform(chunk: Uint8Array, controller: TransformStreamDefaultController<Uint8Array>): void {
-        //         summer.push(chunk);
-        //         controller.enqueue(chunk);
-        //     },
-        //     flush(controller: TransformStreamDefaultController<Uint8Array>): void {
-        //         try {
-        //             controller.enqueue(strToBuf(summer.digest('hex')));
-        //             controller.terminate();
-        //         } finally {
-        //             summer.close();
-        //         }
-        //     }
-        // });
-        // return input.pipeThrough(ts);
+function createSummingReadableStream(input: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+    // const summer = new SHA1Summer();
+    // const ts = new TransformStream<Uint8Array, Uint8Array>({
+    //     transform(chunk: Uint8Array, controller: TransformStreamDefaultController<Uint8Array>): void {
+    //         summer.push(chunk);
+    //         controller.enqueue(chunk);
+    //     },
+    //     flush(controller: TransformStreamDefaultController<Uint8Array>): void {
+    //         try {
+    //             controller.enqueue(strToBuf(summer.digest('hex')));
+    //             controller.terminate();
+    //         } finally {
+    //             summer.close();
+    //         }
+    //     }
+    // });
 
-        const ts = new TransformStream();
-        (async function() {
-            const summer = new SHA1Summer();
+    const ts = new TransformStream();
+    (async function () {
+        const summer = new SHA1Summer();
 
-            const w = ts.writable.getWriter();
-            const r = input.getReader();
-            while (true) {
-                const { done, value } = await r.read();
-                if (done) {
-                    break;
-                }
-
-                summer.push(value);
-                await w.write(value);
+        const w = ts.writable.getWriter();
+        const r = input.getReader();
+        while (true) {
+            const { done, value } = await r.read();
+            if (done) {
+                break;
             }
 
-            await w.write(strToBuf(summer.digest('hex')));
-            await w.close();
-        })();
-
-        return ts.readable;
-    }
-
-    if (!(input instanceof Uint8Array)) {
-        if (typeof input === 'string') {
-            input = new Uint8Array(input.split('').map((c) => c.charCodeAt(0)));
-        } else if (ArrayBuffer.isView(input)) {
-            input = new Uint8Array(input.buffer);
-        } else if (input instanceof ArrayBuffer) {
-            input = new Uint8Array(input);
-        } else {
-            throw new Error(`unsupported input type: ${input[Symbol.toStringTag]}`);
+            summer.push(value);
+            await w.write(value);
         }
-    }
 
-    // return new ReadableStream({
-    //     async pull(controller: ReadableStreamDefaultController<Uint8Array>): Promise<void> {
-    //         controller.enqueue(input as Uint8Array);
-    //         controller.enqueue(await sha1sum(input));
-    //         controller.close();
-    //     },
-    // })
-
-    const ts = new TransformStream<Uint8Array, Uint8Array>({
-        async transform(chunk, controller): Promise<void> {
-            controller.enqueue(chunk);
-            controller.enqueue(strToBuf(await sha1sum(chunk, 'hex')));
-            controller.terminate();
-        },
-    });
-
-    (async function() {
-        const w = ts.writable.getWriter();
-        await w.write(input as Uint8Array);
+        await w.write(strToBuf(summer.digest('hex')));
         await w.close();
-    })()
+    })();
 
     return ts.readable;
 }
 
-async function createUploader(account: AccountFunction, bucketId: string): Promise<Uploader> {
-    for (let i = 0; i < 2; i++) {
-        const { apiUrl, authorizationToken } = await account(!!i);
-        const res = await fetch(apiUrl + '/b2api/v2/b2_get_upload_url', {
-            method: 'POST',
-            headers: { 'Authorization': authorizationToken },
-            body: JSON.stringify({ bucketId }),
-        });
+export class Download {
+    constructor(
+        private _reader: ReadableStream<Uint8Array>,
+        private _headers: Headers,
+    ) {}
 
-        var body = await res.json();
-        if (res.status === 200) {
-            break;
-        }
-
-        switch (body.code) {
-            default:
-                throw new B2APIError(body);
-            case 'expired_auth_token':
-        }
+    public get reader(): ReadableStream<Uint8Array> {
+        return this._reader;
     }
 
-    const { uploadUrl, authorizationToken } = body as UploadURL;
-    return async (file: SumInput, name: string, length: number, options) => {
+    public get(key: string): string {
+        return this._headers.get(key);
+    }
+}
+
+interface DownloadOptions {
+    range?: string;
+    contentDisposition?: string;
+}
+
+class Bucket {
+    constructor(
+        private _client: B2Client,
+        private _bucketId: string,
+    ) {}
+
+    get bucketId(): string {
+        return this._bucketId;
+    }
+
+    async put(file: ReadableStream<Uint8Array>, name: string, length: number, options: { contentType?: string, checksum?: string }): Promise<FileInfo> {
+        const { uploadUrl, authorizationToken }: UploadURL = await this._client[POST]('/b2api/v2/b2_get_upload_url', { bucketId: this._bucketId });
+
         options = options || {};
 
         let body: BodyInit;
@@ -163,6 +115,7 @@ async function createUploader(account: AccountFunction, bucketId: string): Promi
         } else {
             body = createSummingReadableStream(file);
         }
+        
         const res = await fetch(uploadUrl, {
             method: 'POST',
             headers: {
@@ -176,83 +129,125 @@ async function createUploader(account: AccountFunction, bucketId: string): Promi
         });
 
         const data = await res.json();
-
-        if (res.status === 200) {
+        if (res.ok) {
             return data;
         }
 
-        switch (data.code) {
+        throw new B2APIError(data);
+    }
+
+    async info(fileId: string): Promise<FileInfo> {
+        return this[POST]('/b2api/v2/b2_get_file_info', { fileId });
+    }
+
+    public async downloadByName(name: string, options?: DownloadOptions): Promise<Download> {
+        return this[DOWNLOAD_BY_NAME](this._bucketId, name, options);
+    }
+
+    public async downloadById(fileId: string, options?: DownloadOptions): Promise<Download> {
+        return this._client[DOWNLOAD_BY_ID](fileId, options);
+    }
+}
+
+const POST = Symbol('post');
+const DOWNLOAD_BY_NAME = Symbol('download by name');
+const DOWNLOAD_BY_ID = Symbol('download by id');
+
+export class B2Client {
+    public static async create(id: string, key: string): Promise<B2Client> {
+        const client = new B2Client(id, key);
+        await client._refresh();
+        return client;
+    }
+
+    private _authorizedAccount: AuthorizedAccount;
+    private _authToken: string;
+
+    private constructor(id: string, key: string) {
+        this._authToken = btoa(`${id}:${key}`);
+    }
+
+    private async _refresh(): Promise<void> {
+        const res = await fetch('https://api.backblazeb2.com/b2api/v2/b2_authorize_account', {
+            headers: {
+                'Authorization': `Basic ${this._authToken}`,
+                'Accept': 'application/json',
+            },
+        });
+
+        const body = await res.json();
+        if (!res.ok) {
+            throw new B2APIError(body);
+        }
+
+        this._authorizedAccount = body;
+    }
+
+    public async [POST](path: string, data: any): Promise<any> {
+        const { apiUrl, authorizationToken } = this._authorizedAccount;
+        const res = await fetch(apiUrl + path, {
+            method: 'POST',
+            headers: { 'Authorization': authorizationToken },
+            body: JSON.stringify(data),
+        });
+
+        const json = await res.json();
+        if (res.ok) {
+            return json;
+        }
+
+        switch (json.code) {
+            default:
+                throw new B2APIError(json);
+            case 'expired_auth_token':
+            case 'bad_auth_token':
+        }
+        
+        await this._refresh();
+        return this[POST](path, data);
+    }
+
+    public async [DOWNLOAD_BY_NAME](bucketId: string, name: string, options?: DownloadOptions): Promise<Download> {
+        options = options || {};
+
+        const { downloadUrl, authorizationToken } = this._authorizedAccount;
+
+        const headers = {'Authorization': authorizationToken};
+        if (options.range) {
+            headers['Range'] = options.range;
+        }
+
+        const qs = [];
+        if (options.contentDisposition) {
+            qs.push(`b2ContentDisposition=${encodeURIComponent(options.contentDisposition)}`);
+        }
+
+        const res = await fetch(`${downloadUrl}/file/${bucketId}/${name}${qs.length ? '?' + qs.join('&') : ''}`, { headers });
+        if (res.status === 200) {
+            return new Download(res.body, res.headers);
+        }
+
+        const json = await res.json();
+        switch (json.code) {
+            default:
+                throw new B2APIError(json);
             case 'bad_auth_token':
             case 'expired_auth_token':
-            case 'service_unavailable':
-                throw Expired;
         }
 
-        throw new B2APIError(data);
-    };
-}
+        await this._refresh();
+        return this[DOWNLOAD_BY_NAME](bucketId, name, options);
 
-async function* createUploaderFactory(account: AccountFunction, bucketId: string): UploaderFactory {
-    const queue = [];
-    while (true) {
-        if (queue.length > 0) {
-            yield queue.shift();
-        } else {
-            const uploader = await createUploader(account, bucketId);
-            const uploadFn = async function () {
-                const result = await uploader.apply(null, arguments);
-                // discard this uploader it throws an exception
-                queue.push(uploadFn);
-                return result;
-            } as Uploader;
-            yield uploadFn;
-        }
-    }
-}
-
-function createAccountFunc(accountFactory: AccountFactory): AccountFunction {
-    let account;
-    return async function (renew?: boolean): Promise<AuthorizedAccount> {
-        if (!renew && account) {
-            return account;
-        }
-
-        return ({ value: account } = await accountFactory.next()) && account;
-    };
-}
-
-class Bucket {
-    private _account: AccountFunction;
-    private _uploaderPool: UploaderFactory;
-
-    constructor(accountFactory: AccountFactory, private _bucketId: string) {
-        this._account = createAccountFunc(accountFactory);
-        this._uploaderPool = createUploaderFactory(this._account, this._bucketId);
     }
 
-    get bucketId(): string {
-        return this._bucketId;
-    }
-
-    async put(file: BodyInit, name: string, length: number, options: { contentType?: string, checksum?: string }): Promise<string>;
-    async put(): Promise<string> {
-        for (let i = 0; i < 2; i++) {
-            const { value } = await this._uploaderPool.next();
-            try {
-                return (await value.apply(null, arguments)).fileId;
-            } catch (err) {
-                if (i || err !== Expired) {
-                    throw err;
-                }
-            }
-
-            // retry with new uploader
-        }
-    }
-
-    async get(fileId: string, options?: { range?: string, contentDisposition?: string }): Promise<File> {
+    public async [DOWNLOAD_BY_ID](fileId: string, options?: DownloadOptions): Promise<Download> {
         options = options || {};
-        const headers = {};
+        const { downloadUrl, authorizationToken } = this._authorizedAccount;
+        
+        const headers = {
+            'Authorization': authorizationToken,
+            'Content-Type': 'application/json',
+        };
         if (options.range) {
             headers['Range'] = options.range;
         }
@@ -262,75 +257,33 @@ class Bucket {
             body['b2ContentDisposition'] = options.contentDisposition;
         }
 
-        for (let i = 0; i < 2; i++) {
-            const { downloadUrl, authorizationToken } = await this._account(!!i);
-            const res = await fetch(downloadUrl + '/b2api/v2/b2_download_file_by_id', {
-                method: 'POST',
-                headers: {
-                    'Authorization': authorizationToken,
-                    'Content-Type': 'application/json',
-                    ...headers,
-                },
-                body: JSON.stringify(body),
-            });
-
-            if (res.status === 200) {
-                return Object.defineProperty(res.body, 'get', {
-                    value: (k: string) => res.headers.get(k),
-                });
-            }
-
-            const data = await res.json();
-
-            switch (data.code) {
-                default:
-                    throw new B2APIError(data);
-                case 'bad_auth_token':
-                case 'expired_auth_token':
-                    if (!!i) {
-                        throw new B2APIError(data);
-                    }
-            }
-
-            // retry with a new downloadUrl
-        }
-    }
-}
-
-async function* createAccountFactory(token: string): AsyncIterator<AuthorizedAccount> {
-    while (true) {
-        const res = await fetch('https://api.backblazeb2.com/b2api/v2/b2_authorize_account', {
+        const res = await fetch(downloadUrl + '/b2api/v2/b2_download_file_by_id', {
+            method: 'POST',
             headers: {
-                'Authorization': `Basic ${token}`,
-                'Accept': 'application/json',
+                'Authorization': authorizationToken,
+                'Content-Type': 'application/json',
+                ...headers,
             },
+            body: JSON.stringify(body),
         });
 
-        const body = await res.json();
-
         if (res.status === 200) {
-            yield body;
-        } else {
-            throw new B2APIError(body);
+            return new Download(res.body, res.headers);
         }
-    }
+
+        const json = await res.json();
+        switch (json.code) {
+            default:
+                throw new B2APIError(json);
+            case 'bad_auth_token':
+            case 'expired_auth_token':
+        }
+
+        await this._refresh();
+        return this[DOWNLOAD_BY_ID](fileId, options);
 }
 
-export class B2Client {
-    private _accountFactory: AccountFactory;
-
-    constructor(id: string);
-    constructor(id: string, key: string);
-    constructor(id_or_token: string, key?: string) {
-        let token = id_or_token;
-        if (key) {
-            token = btoa(id_or_token + ':' + key);
-        }
-
-        this._accountFactory = createAccountFactory(token);
-    }
-
-    bucket(bucketId: string): Bucket {
-        return new Bucket(this._accountFactory, bucketId);
+    public bucket(bucketId: string): Bucket {
+        return new Bucket(this, bucketId);
     }
 }
